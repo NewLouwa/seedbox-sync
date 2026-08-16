@@ -1,0 +1,40 @@
+# ============================================================
+# config.sh.example - Copy this file to config.sh and adapt it
+# cp config.sh.example config.sh
+# ============================================================
+
+# ============================================================
+# ADAPT TO YOUR SETUP
+# ============================================================
+
+# Remote-folder to local-folder mappings
+declare -A MAPPINGS=(
+    ['remote/path/CategoryA']='local-folder-name-a'
+    ['remote/path/CategoryB']='local/sub/path-b'
+)
+
+# Local destination root
+LOCAL_BASE="${LOCAL_BASE:-/mnt/dl}"
+
+# Default log level - DEBUG < INFO < WARN < ERROR
+LOG_LEVEL="${LOG_LEVEL:-INFO}"
+
+# Delete remote files after a successful transfer (irreversible!)
+DELETE_AFTER_IMPORT="${DELETE_AFTER_IMPORT:-0}"
+
+# Max lifetime of a lock before it's force-cleaned, in seconds
+LOCK_TTL_SECONDS="${LOCK_TTL_SECONDS:-3600}"
+
+# Log rotation - used by 'sbs install-logrotate' to generate /etc/logrotate.d/ass-sync
+LOG_ROTATE_FREQUENCY="${LOG_ROTATE_FREQUENCY:-weekly}"   # daily/weekly/monthly
+LOG_ROTATE_COUNT="${LOG_ROTATE_COUNT:-8}"                 # how many rotated logs to keep
+
+# ============================================================
+# DO NOT TOUCH unless you know what you're doing
+# ============================================================
+
+PAUSE_FLAG="/opt/scripts/seedbox-sync/PAUSED"
+LOCK_DIR="/tmp/ass.lock.d"
+PID_FILE="/tmp/ass-sync.pid"
+MONITOR_PID_FILE="/tmp/ass-sync-monitors.pid"
+LOG_FILE="/var/log/ass-sync.log"

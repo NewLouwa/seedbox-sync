@@ -1,17 +1,18 @@
 #!/bin/bash
 
+CONFIG_SCRIPT="/opt/scripts/seedbox-sync/config.sh"
+
 set -a
 source /etc/seedbox-sync.env
 set +a
 
-LOCAL_BASE="${LOCAL_BASE:-/mnt/dl}"
-PAUSE_FLAG="/opt/scripts/seedbox-sync/PAUSED"
-LOCK_DIR="/tmp/ass.lock.d"
-PID_FILE="/tmp/ass-sync.pid"
-MONITOR_PID_FILE="/tmp/ass-sync-monitors.pid"
-LOG_FILE="/var/log/ass-sync.log"
-OLD_LOCK_THRESHOLD=3600
-LOG_LEVEL="${LOG_LEVEL:-INFO}"   # DEBUG < INFO < WARN < ERROR
+if [ ! -f "$CONFIG_SCRIPT" ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [ERROR] config.sh not found at $CONFIG_SCRIPT - copy config.sh.example and adapt it" >&2
+    exit 1
+fi
+source "$CONFIG_SCRIPT"
+
+OLD_LOCK_THRESHOLD="$LOCK_TTL_SECONDS"
 
 declare -A LVL_RANK=( [DEBUG]=0 [INFO]=1 [WARN]=2 [ERROR]=3 )
 THRESHOLD="${LVL_RANK[$LOG_LEVEL]:-1}"
@@ -43,58 +44,51 @@ FILTER="${1:-}"
 RUN_SOURCE="${SOURCE:-cron}"
 
 if [ -f "$PAUSE_FLAG" ] && [ "${FORCE_RUN:-0}" != "1" ]; then
-    log INFO "Pause active - lancement ${RUN_SOURCE} ignore (PID $$)"
+    log INFO "Pause active - ${RUN_SOURCE} launch skipped (PID $$)"
     exit 0
 fi
 
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     LOCK_AGE=$(( $(date +%s) - $(stat -c %Y "$LOCK_DIR") ))
     if [ "$LOCK_AGE" -lt "$OLD_LOCK_THRESHOLD" ]; then
-        log WARN "Lock detecte (${LOCK_AGE}s < ${OLD_LOCK_THRESHOLD}s) - Exit"
+        log WARN "Lock detected (${LOCK_AGE}s < ${OLD_LOCK_THRESHOLD}s) - Exit"
         exit 1
     fi
-    log WARN "Lock ancien (${LOCK_AGE}s) - Suppression et restart"
+    log WARN "Stale lock (${LOCK_AGE}s) - removing and restarting"
     rm -rf "$LOCK_DIR"
     mkdir "$LOCK_DIR"
 fi
 trap '[ -n "${MONITOR_PID:-}" ] && kill "$MONITOR_PID" 2>/dev/null; rm -rf "$LOCK_DIR" "$PID_FILE"' EXIT
-trap 'log WARN "Arrete manuellement (SIGTERM)"; exit 143' TERM
-trap 'log WARN "Interrompu (SIGINT)"; exit 130' INT
+trap 'log WARN "Manually stopped (SIGTERM)"; exit 143' TERM
+trap 'log WARN "Interrupted (SIGINT)"; exit 130' INT
 echo $$ > "$PID_FILE"
 
 log INFO "=============================================="
-log INFO "Demarrage sync... (source: ${RUN_SOURCE}, PID $$)"
+log INFO "Starting sync... (source: ${RUN_SOURCE}, PID $$)"
 
-declare -A MAPPINGS=(
-    ['media/Anime']='anime'
-    ['media/Animated Movies']='Animated Movies'
-    ['media/Books']='staging/books'
-    ['media/Cartoons']='cartoons'
-    ['media/Movies']='movies'
-    ['media/TV Shows']='shows'
-    ['media/adult-media']='adult-media'
-    ['media/jellyfin-adult']='jellyfin-adult'
-    ['media/Music']='music'
-)
+if ! declare -p MAPPINGS >/dev/null 2>&1; then
+    log ERROR "MAPPINGS not defined - check the declare -A MAPPINGS block in $CONFIG_SCRIPT"
+    exit 1
+fi
 
 ALL_KEYS=("${!MAPPINGS[@]}")
 
 DELETE_FLAG=""
 if [ "${DELETE_AFTER_IMPORT:-0}" = "1" ]; then
     DELETE_FLAG="--Remove-source-files"
-    log WARN "DELETE_AFTER_IMPORT actif - les fichiers distants seront supprimes apres transfert reussi (irreversible)"
+    log WARN "DELETE_AFTER_IMPORT active - remote files will be deleted after a successful transfer (irreversible)"
 fi
 
 if [ -n "${SSH_KEY:-}" ] && [ -f "$SSH_KEY" ]; then
-    SSH_BASE=(ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -p "${SSH_PORT:-22}" "$REMOTE_USER@$REMOTE_HOST")
+    SSH_BASE=(ssh -n -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -p "${SSH_PORT:-22}" "$REMOTE_USER@$REMOTE_HOST")
 elif command -v sshpass >/dev/null 2>&1; then
-    SSH_BASE=(sshpass -p "$REMOTE_PASS" ssh -o StrictHostKeyChecking=accept-new -p "${SSH_PORT:-22}" "$REMOTE_USER@$REMOTE_HOST")
+    SSH_BASE=(sshpass -p "$REMOTE_PASS" ssh -n -o StrictHostKeyChecking=accept-new -p "${SSH_PORT:-22}" "$REMOTE_USER@$REMOTE_HOST")
 else
     SSH_BASE=()
 fi
 
-# Lance un monitoring de progression en arriere-plan (taille locale vs distante, toutes les 60s)
-# Retourne le PID du monitor via la variable globale MONITOR_PID (vide si indisponible)
+# Starts a background progress monitor (local vs remote size, every 60s)
+# Returns the monitor's PID via the global MONITOR_PID variable (empty if unavailable)
 start_progress_monitor() {
     local remote_dir="$1"
     local local_dir="$2"
@@ -114,7 +108,7 @@ start_progress_monitor() {
 
     (
         local cur elapsed transferred avg_kb pct remain eta_sec eta_min eta_txt tick=0
-        local max_ticks=360   # TTL de securite ~6h (360 * 60s) - meme orphelin, s'arrete tout seul
+        local max_ticks=360   # Safety TTL ~6h (360 * 60s) - self-terminates even if orphaned
         while [ "$tick" -lt "$max_ticks" ]; do
             sleep 60
             tick=$((tick + 1))
@@ -124,14 +118,14 @@ start_progress_monitor() {
             transferred=$(( cur - baseline ))
 
             if [ "$cur" -ge "$remote_size" ]; then
-                # Local >= distant : fichiers legacy (anciennes versions/re-releases jamais
-                # nettoyees par mirror sans --delete) faussent le total, pas d'ETA fiable
-                log INFO "  Local >= taille distante totale (fichiers legacy probables)"
+                # Local >= remote: legacy files (old versions/re-releases never cleaned up
+                # by mirror without --delete) skew the total, no reliable ETA
+                log INFO "  Local >= total remote size (legacy files likely)"
                 continue
             fi
 
-            # Debit moyen depuis le debut du monitoring (pas juste la derniere minute) -
-            # evite le bruit d'echantillonnage/arrondi entier sur un intervalle trop court
+            # Average throughput since the monitor started (not just the last minute) -
+            # avoids sampling/rounding noise over too short an interval
             if [ "$elapsed" -gt 0 ] && [ "$transferred" -gt 0 ]; then
                 avg_kb=$(( transferred / elapsed / 1024 ))
             else
@@ -147,7 +141,7 @@ start_progress_monitor() {
             else
                 eta_txt="?"
             fi
-            log INFO "  Progression ~${pct}% (moy: $(( avg_kb / 1024 )) MB/s, ETA ${eta_txt})"
+            log INFO "  Progress ~${pct}% (avg: $(( avg_kb / 1024 )) MB/s, ETA ${eta_txt})"
         done
     ) &
     MONITOR_PID=$!
@@ -172,15 +166,18 @@ if [ -n "$FILTER" ]; then
 fi
 
 if [ -n "$FILTER" ] && [ "$CATEGORY_MATCH" -eq 0 ]; then
-    # Titre precis (film/serie), pas une categorie - recherche recursive via SSH
-    log INFO "Recherche recursive du titre '$FILTER' via SSH..."
+    # Specific title (movie/show), not a category - recursive search via SSH
+    log INFO "Recursive search for title '$FILTER' via SSH..."
     TITLE_FOUND=0
 
-    [ "${#SSH_BASE[@]}" -eq 0 ] && log WARN "Pas de SSH_KEY ni sshpass - recherche titre impossible, passage direct au sync normal"
+    [ "${#SSH_BASE[@]}" -eq 0 ] && log WARN "No SSH_KEY or sshpass - title search unavailable, falling through to normal sync"
 
     if [ "${#SSH_BASE[@]}" -gt 0 ]; then
-        # mindepth/maxdepth 2 = niveau "titre" (media/Categorie/Titre), pas les fichiers en dessous
+        # mindepth/maxdepth 2 = "title" level (media/Category/Title), not the files underneath
         RAW_MATCHES=$("${SSH_BASE[@]}" "find media -mindepth 2 -maxdepth 2 -iname '*${FILTER}*' 2>/dev/null")
+        RAW_MATCH_COUNT=$(echo "$RAW_MATCHES" | grep -c . || true)
+        log INFO "Remote search returned ${RAW_MATCH_COUNT} title-level match(es)"
+        log DEBUG "Raw matches: $(echo "$RAW_MATCHES" | tr '\n' ' | ')"
 
         while IFS= read -r remote_full_path; do
             [ -z "$remote_full_path" ] && continue
@@ -192,14 +189,17 @@ if [ -n "$FILTER" ] && [ "$CATEGORY_MATCH" -eq 0 ]; then
                 esac
                 [ -n "$MATCHED_KEY" ] && break
             done
-            [ -z "$MATCHED_KEY" ] && continue
+            if [ -z "$MATCHED_KEY" ]; then
+                log WARN "Match '$remote_full_path' does not fall under any MAPPINGS key - skipped"
+                continue
+            fi
 
             local_folder="${MAPPINGS[$MATCHED_KEY]}"
             rel="${remote_full_path#"$MATCHED_KEY"/}"
             local_path="$LOCAL_BASE/$local_folder"
 
             TITLE_FOUND=1
-            log INFO "Match titre: ~/$remote_full_path"
+            log INFO "Title match: ~/$remote_full_path"
             mkdir -p "$local_path/$rel"
             start_progress_monitor "$remote_full_path" "$local_path/$rel"
             TMP_OUT=$(mktemp)
@@ -218,15 +218,15 @@ LFTPEOF
             TITLE_OUT=$(cat "$TMP_OUT")
             rm -f "$TMP_OUT"
             if [ "$RC_TITLE" -eq 0 ]; then
-                log INFO "OK titre '$rel'"
+                log INFO "OK title '$rel'"
             else
-                log ERROR "FAIL titre '$rel': $(echo "$TITLE_OUT" | tail -n 5 | tr '\n' ' | ')"
+                log ERROR "FAIL title '$rel': $(echo "$TITLE_OUT" | tail -n 5 | tr '\n' ' | ')"
             fi
         done <<< "$RAW_MATCHES"
     fi
 
-    [ "$TITLE_FOUND" -eq 0 ] && log WARN "Aucun titre trouve pour '$FILTER' - passage au sync normal"
-    log INFO "Recherche titre terminee, reprise du sync normal complet"
+    [ "$TITLE_FOUND" -eq 0 ] && log WARN "No title found for '$FILTER' - falling back to normal sync"
+    log INFO "Title search complete, resuming full normal sync"
 fi
 
 if [ -n "$FILTER" ] && [ "$CATEGORY_MATCH" -eq 1 ]; then
@@ -240,9 +240,9 @@ if [ -n "$FILTER" ] && [ "$CATEGORY_MATCH" -eq 1 ]; then
         fi
     done
     if [ "${#PRIORITY_KEYS[@]}" -eq 0 ]; then
-        log WARN "Filtre '$FILTER' ne matche aucun dossier - ordre normal"
+        log WARN "Filter '$FILTER' matches no folder - normal order"
     else
-        log INFO "Filtre '$FILTER' -> priorite: ${PRIORITY_KEYS[*]}"
+        log INFO "Filter '$FILTER' -> priority: ${PRIORITY_KEYS[*]}"
     fi
     ORDERED_KEYS=("${PRIORITY_KEYS[@]}" "${OTHER_KEYS[@]}")
 else
@@ -258,7 +258,7 @@ for remote_path in "${ORDERED_KEYS[@]}"; do
     local_path="$LOCAL_BASE/$local_folder"
     mkdir -p "$local_path"
 
-    log INFO "Debut: ~/$remote_path -> $local_path"
+    log INFO "Starting: ~/$remote_path -> $local_path"
     START_TS=$(date +%s)
 
     start_progress_monitor "$remote_path" "$local_path"
@@ -292,7 +292,7 @@ done
 
 log INFO "=============================================="
 if [ "$FAIL" -eq 0 ]; then
-    log INFO "FIN: $SUCCESS reussi, $FAIL echoue"
+    log INFO "DONE: $SUCCESS succeeded, $FAIL failed"
 else
-    log WARN "FIN: $SUCCESS reussi, $FAIL echoue -> ${FAILED_PATHS[*]}"
+    log WARN "DONE: $SUCCESS succeeded, $FAIL failed -> ${FAILED_PATHS[*]}"
 fi

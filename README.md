@@ -18,12 +18,14 @@ One-way media sync from a remote seedbox via SFTP (lftp), with recursive SSH-bas
 
 The script runs on a cron schedule (every 30 minutes by default) and mirrors a set of remote folders to local storage, one at a time, only re-transferring what has changed (size/modification date). A command-line interface (`control.sh`, aliased `sbs`) lets you control everything without touching the cron job: trigger an immediate sync, target a specific title, pause, stop a running sync, test the connection, or search for a file without downloading it.
 
-Two main files:
+Four main files:
 
-| File | Role |
-|---|---|
-| `control.sh` | User interface - every command goes through it (aliased `sbs`) |
-| `scripts/sync.sh` | Transfer logic - called by cron or by `control.sh start` |
+| File | Role | Contains secrets? | Tracked in git? |
+|---|---|---|---|
+| `control.sh` | User interface - every command goes through it (aliased `sbs`) | No | Yes |
+| `scripts/sync.sh` | Transfer logic - called by cron or by `control.sh start` | No | Yes |
+| `config.sh` | Behavior settings: mappings, paths, defaults | No, but reveals your folder layout | **No** (gitignored - copy from `config.sh.example`) |
+| `/etc/seedbox-sync.env` | Credentials only | **Yes** | No |
 
 ## Features
 
@@ -54,9 +56,9 @@ mkdir -p /opt/scripts/seedbox-sync/scripts
 chmod +x /opt/scripts/seedbox-sync/control.sh /opt/scripts/seedbox-sync/scripts/sync.sh
 ```
 
-### 2. Configuration
+### 2. Credentials
 
-Configuration lives **outside the repo**, in `/etc/seedbox-sync.env`, with restrictive permissions:
+Credentials live **outside the repo**, in `/etc/seedbox-sync.env`, with restrictive permissions - nothing else goes in this file:
 
 ```bash
 cat > /etc/seedbox-sync.env << 'EOF'
@@ -67,9 +69,6 @@ REMOTE_PASS='password_in_single_quotes'
 # Optional - SSH-based search (see How it works)
 #SSH_KEY=/root/.ssh/seedbox_ed25519
 #SSH_PORT=22
-
-# Optional - delete remote files after a successful transfer (irreversible, off by default)
-#DELETE_AFTER_IMPORT=1
 EOF
 
 chmod 600 /etc/seedbox-sync.env
@@ -78,9 +77,21 @@ chown root:root /etc/seedbox-sync.env
 
 The password must be wrapped in single quotes to prevent bash from interpreting any special characters it might contain (`$`, `` ` ``, spaces, etc).
 
-`DELETE_AFTER_IMPORT=1` adds `--Remove-source-files` to every `mirror` call: once a file is confirmed fully transferred, it's deleted from the remote seedbox. Useful for freeing up seedbox storage automatically, but **irreversible** - a failed or partial transfer is never deleted (lftp only removes after a confirmed successful transfer), but anything that does complete is gone from the remote immediately. Leave this unset/off unless you specifically want that behavior.
+### 3. Settings
 
-### 3. Cron
+Everything else - mappings, paths, defaults - lives in `config.sh`, next to the scripts. It's gitignored (it reveals your real folder layout), so start from the tracked example:
+
+```bash
+cd /opt/scripts/seedbox-sync
+cp config.sh.example config.sh
+nano config.sh   # fill in your MAPPINGS at minimum
+```
+
+`config.sh` is split into two clearly marked sections: values meant to be adapted per deployment (mappings, `LOCAL_BASE`, `LOG_LEVEL`, `DELETE_AFTER_IMPORT`, `LOCK_TTL_SECONDS`), and internal paths you normally shouldn't touch (`PAUSE_FLAG`, `LOCK_DIR`, `PID_FILE`, `MONITOR_PID_FILE`, `LOG_FILE`) since they're referenced elsewhere (logrotate config, this same pair of scripts) and changing them without updating everything else breaks consistency.
+
+`DELETE_AFTER_IMPORT=1` adds `--Remove-source-files` to every `mirror` call: once a file is confirmed fully transferred, it's deleted from the remote seedbox. Useful for freeing up seedbox storage automatically, but **irreversible** - a failed or partial transfer is never deleted (lftp only removes after a confirmed successful transfer), but anything that does complete is gone from the remote immediately. Leave this at `0` unless you specifically want that behavior.
+
+### 4. Cron
 
 A single entry, under `root` only (avoids duplicates if the script ends up running under multiple accounts at once):
 
@@ -94,7 +105,7 @@ Add:
 */30 * * * * /opt/scripts/seedbox-sync/scripts/sync.sh >> /var/log/cron-sync.log 2>&1
 ```
 
-### 4. Global alias
+### 5. Global alias
 
 ```bash
 ln -sf /opt/scripts/seedbox-sync/control.sh /usr/local/bin/sbs
@@ -102,22 +113,15 @@ ln -sf /opt/scripts/seedbox-sync/control.sh /usr/local/bin/sbs
 
 Makes the `sbs` command available everywhere, for every user, without typing the full path.
 
-### 5. Log rotation
+### 6. Log rotation
 
 ```bash
-cat > /etc/logrotate.d/ass-sync << 'EOF'
-/var/log/ass-sync.log {
-    weekly
-    rotate 8
-    compress
-    missingok
-    notifempty
-    copytruncate
-}
-EOF
+sbs install-logrotate
 ```
 
-### 6. SSH-based search (optional but recommended)
+Generates `/etc/logrotate.d/ass-sync` directly from `LOG_FILE`, `LOG_ROTATE_FREQUENCY`, and `LOG_ROTATE_COUNT` in `config.sh` - stays consistent automatically if you ever change `LOG_FILE`, instead of drifting from a manually-written logrotate file. Re-run it any time those values change. Requires root.
+
+### 7. SSH-based search (optional but recommended)
 
 See [How it works](#recursive-search) for details. In short, generate a dedicated key pair:
 
@@ -133,6 +137,16 @@ Without a configured key, the script automatically falls back to `sshpass` (inst
 ## Usage
 
 Every command goes through `sbs` (once the alias is set up) or directly through `/opt/scripts/seedbox-sync/control.sh`.
+
+### `sbs watch`
+
+Live-tails the log file with color coding matching the log levels (green INFO, yellow WARN, red ERROR, cyan DEBUG). The log file itself stays plain text (so it's always `grep`-able); coloring happens only at display time.
+
+```
+$ sbs watch
+Following /var/log/ass-sync.log live (Ctrl+C to quit)...
+[2026-08-16 05:32:23] [INFO]   Transferring file `Another.E03.mkv'
+```
 
 ### `sbs test`
 
@@ -201,7 +215,7 @@ No run in progress
 
 ## Customizing mappings
 
-Remote-folder to local-folder mappings are defined in the `MAPPINGS` variable, duplicated identically in `scripts/sync.sh` and in the `find` section of `control.sh`:
+Remote-folder to local-folder mappings live in `config.sh`, next to the scripts (see [Settings](#3-settings)). Since both `sync.sh` and `control.sh` `source` this file directly (not through a subprocess environment), a plain `declare -A` block works exactly as if it were written inline:
 
 ```bash
 declare -A MAPPINGS=(
@@ -211,10 +225,10 @@ declare -A MAPPINGS=(
 ```
 
 - **Key**: path relative to the SFTP account's home directory on the seedbox.
-- **Value**: path relative to `LOCAL_BASE` (`/mnt/dl` by default, overridable via the `LOCAL_BASE` environment variable).
+- **Value**: path relative to `LOCAL_BASE` (also set in `config.sh`).
 - As many entries as needed; each entry triggers a full recursive mirror.
 
-To add, rename, or remove a category: edit the `MAPPINGS` block in **both files**. Letting them drift out of sync would mean `find`/`test` and the actual sync no longer see the same folders.
+To add, rename, or remove a category: edit this block in `config.sh` only - one file, no duplication between scripts.
 
 ## How it works
 
