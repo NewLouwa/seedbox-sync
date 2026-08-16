@@ -2,6 +2,7 @@
 
 PAUSE_FLAG="/opt/scripts/seedbox-sync/PAUSED"
 PID_FILE="/tmp/ass-sync.pid"
+MONITOR_PID_FILE="/tmp/ass-sync-monitors.pid"
 LOCK_DIR="/tmp/ass.lock.d"
 
 if [ -t 1 ]; then
@@ -86,7 +87,7 @@ case "$1" in
             exit 1
         fi
         info "Lancement manuel${FILTER:+ (priorite: $FILTER)}..."
-        nohup env FORCE_RUN=1 /opt/scripts/seedbox-sync/scripts/sync.sh "$FILTER" >> /var/log/cron-sync.log 2>&1 &
+        nohup env FORCE_RUN=1 SOURCE=manual /opt/scripts/seedbox-sync/scripts/sync.sh "$FILTER" >> /var/log/cron-sync.log 2>&1 &
         disown
         ok "Lance en arriere-plan, PID $!"
         echo "Suivi: tail -f /var/log/ass-sync.log"
@@ -104,7 +105,16 @@ case "$1" in
         if pkill -f "lftp -u.*sftp://" 2>/dev/null; then
             warn "Process lftp actif tue"
         fi
-        rm -rf "$LOCK_DIR" "$PID_FILE"
+        if [ -f "$MONITOR_PID_FILE" ]; then
+            while IFS= read -r mpid; do
+                [ -z "$mpid" ] && continue
+                if kill -0 "$mpid" 2>/dev/null; then
+                    kill -9 "$mpid" 2>/dev/null
+                    warn "Monitor de progression orphelin tue (PID $mpid)"
+                fi
+            done < "$MONITOR_PID_FILE"
+        fi
+        rm -rf "$LOCK_DIR" "$PID_FILE" "$MONITOR_PID_FILE"
         ok "Lock et PID nettoyes"
         ;;
     status)

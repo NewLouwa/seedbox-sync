@@ -8,6 +8,7 @@ LOCAL_BASE="${LOCAL_BASE:-/mnt/dl}"
 PAUSE_FLAG="/opt/scripts/seedbox-sync/PAUSED"
 LOCK_DIR="/tmp/ass.lock.d"
 PID_FILE="/tmp/ass-sync.pid"
+MONITOR_PID_FILE="/tmp/ass-sync-monitors.pid"
 LOG_FILE="/var/log/ass-sync.log"
 OLD_LOCK_THRESHOLD=3600
 LOG_LEVEL="${LOG_LEVEL:-INFO}"   # DEBUG < INFO < WARN < ERROR
@@ -110,9 +111,11 @@ start_progress_monitor() {
     [ -z "$baseline" ] && baseline=0
 
     (
-        local prev=$baseline cur delta rate_mb pct remain eta_min eta_txt
-        while true; do
+        local prev=$baseline cur delta rate_mb pct remain eta_min eta_txt tick=0
+        local max_ticks=360   # TTL de securite ~6h (360 * 60s) - meme orphelin, s'arrete tout seul
+        while [ "$tick" -lt "$max_ticks" ]; do
             sleep 60
+            tick=$((tick + 1))
             cur=$(du -sb "$local_dir" 2>/dev/null | cut -f1)
             [ -z "$cur" ] && cur=0
             delta=$(( cur - prev ))
@@ -138,10 +141,15 @@ start_progress_monitor() {
         done
     ) &
     MONITOR_PID=$!
+    echo "$MONITOR_PID" >> "$MONITOR_PID_FILE"
 }
 
 stop_progress_monitor() {
-    [ -n "${MONITOR_PID:-}" ] && kill "$MONITOR_PID" 2>/dev/null
+    if [ -n "${MONITOR_PID:-}" ]; then
+        kill "$MONITOR_PID" 2>/dev/null
+        grep -v "^${MONITOR_PID}$" "$MONITOR_PID_FILE" 2>/dev/null > "${MONITOR_PID_FILE}.tmp" || true
+        mv -f "${MONITOR_PID_FILE}.tmp" "$MONITOR_PID_FILE" 2>/dev/null
+    fi
     MONITOR_PID=""
 }
 
