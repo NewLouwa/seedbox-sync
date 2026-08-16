@@ -247,8 +247,6 @@ An atomic lock (`mkdir /tmp/ass.lock.d` - atomic because `mkdir` fails if the di
 
 ## Security
 
-- `.env` must never end up in this repo, nor in plain text in a ticket/chat/paste.
-- Change the seedbox password immediately if it's ever exposed, even accidentally.
 - Always wrap the password in single quotes in `.env` to neutralize shell special characters.
 - `xfer:use-temp-file` is enabled by default - see [Atomic writes](#atomic-writes).
 - Prefer a dedicated SSH key (not reused elsewhere) over `sshpass`, which exposes the password in the process list during execution.
