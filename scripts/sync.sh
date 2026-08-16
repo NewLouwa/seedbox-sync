@@ -66,12 +66,11 @@ log INFO "Demarrage sync..."
 declare -A MAPPINGS=(
     ['media/Anime']='anime'
     ['media/Animated Movies']='Animated Movies'
-    ['media/Books']='staging/books'
+    ['media/Books']='books'
     ['media/Cartoons']='cartoons'
     ['media/Movies']='movies'
     ['media/TV Shows']='shows'
     ['media/adult-media']='adult-media'
-    ['media/jellyfin-adult']='jellyfin-adult'
     ['media/Music']='music'
 )
 
