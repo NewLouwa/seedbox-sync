@@ -109,35 +109,45 @@ start_progress_monitor() {
 
     baseline=$(du -sb "$local_dir" 2>/dev/null | cut -f1)
     [ -z "$baseline" ] && baseline=0
+    local start_ts
+    start_ts=$(date +%s)
 
     (
-        local prev=$baseline cur delta rate_mb pct remain eta_min eta_txt tick=0
+        local cur elapsed transferred avg_kb pct remain eta_sec eta_min eta_txt tick=0
         local max_ticks=360   # TTL de securite ~6h (360 * 60s) - meme orphelin, s'arrete tout seul
         while [ "$tick" -lt "$max_ticks" ]; do
             sleep 60
             tick=$((tick + 1))
             cur=$(du -sb "$local_dir" 2>/dev/null | cut -f1)
             [ -z "$cur" ] && cur=0
-            delta=$(( cur - prev ))
-            rate_mb=$(( delta / 60 / 1024 / 1024 ))
-            prev=$cur
+            elapsed=$(( $(date +%s) - start_ts ))
+            transferred=$(( cur - baseline ))
 
             if [ "$cur" -ge "$remote_size" ]; then
                 # Local >= distant : fichiers legacy (anciennes versions/re-releases jamais
                 # nettoyees par mirror sans --delete) faussent le total, pas d'ETA fiable
-                log INFO "  Local >= taille distante totale (fichiers legacy probables) - ${rate_mb} MB/s sur la derniere minute"
+                log INFO "  Local >= taille distante totale (fichiers legacy probables)"
                 continue
+            fi
+
+            # Debit moyen depuis le debut du monitoring (pas juste la derniere minute) -
+            # evite le bruit d'echantillonnage/arrondi entier sur un intervalle trop court
+            if [ "$elapsed" -gt 0 ] && [ "$transferred" -gt 0 ]; then
+                avg_kb=$(( transferred / elapsed / 1024 ))
+            else
+                avg_kb=0
             fi
 
             pct=$(( cur * 100 / remote_size ))
             remain=$(( remote_size - cur ))
-            if [ "$rate_mb" -gt 0 ]; then
-                eta_min=$(( remain / 1024 / 1024 / rate_mb / 60 ))
+            if [ "$avg_kb" -gt 0 ]; then
+                eta_sec=$(( remain / 1024 / avg_kb ))
+                eta_min=$(( eta_sec / 60 ))
                 eta_txt="${eta_min} min"
             else
                 eta_txt="?"
             fi
-            log INFO "  Progression ~${pct}% (${rate_mb} MB/s, ETA ${eta_txt})"
+            log INFO "  Progression ~${pct}% (moy: $(( avg_kb / 1024 )) MB/s, ETA ${eta_txt})"
         done
     ) &
     MONITOR_PID=$!
