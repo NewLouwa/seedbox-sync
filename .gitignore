@@ -4,3 +4,4 @@ PAUSED
 *.swp
 .DS_Store
 .env
+config.sh
