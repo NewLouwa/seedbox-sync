@@ -1,0 +1,9 @@
+PAUSED
+*.log
+*.pid
+*.swp
+.DS_Store
+Thumbs.db
+.env
+secrets/
+*.lock
