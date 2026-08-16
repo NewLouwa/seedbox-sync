@@ -61,6 +61,31 @@ cat > /etc/logrotate.d/ass-sync << 'EOF'
 EOF
 ```
 
+### 5. Adapter les mappings
+
+Les correspondances dossier-distant → dossier-local sont codees en dur
+dans `scripts/sync.sh` (variable `MAPPINGS`), dupliquees a l'identique
+dans `control.sh` pour les commandes `find`/`test`. Format :
+
+```bash
+declare -A MAPPINGS=(
+    ['chemin/distant/CategorieA']='nom-dossier-local-a'
+    ['chemin/distant/CategorieB']='sous/chemin/local-b'
+)
+```
+
+- La cle = chemin relatif sur la seedbox (racine = le repertoire home
+  du compte SFTP).
+- La valeur = chemin relatif sous `LOCAL_BASE` (`/mnt/dl` par defaut,
+  surchargeable via la variable d'env `LOCAL_BASE`).
+- Autant d'entrees que necessaire, un mirror recursif complet par
+  entree.
+
+Pour ajouter/retirer une categorie : edite le bloc `MAPPINGS` dans les
+**deux fichiers** (`scripts/sync.sh` et `control.sh`, section `find`),
+ils doivent rester synchronises sinon `find` et le sync reel ne
+verront pas les memes dossiers.
+
 ## Commandes
 
 | Commande | Effet |
