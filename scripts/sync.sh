@@ -39,9 +39,10 @@ log() {
 }
 
 FILTER="${1:-}"
+RUN_SOURCE="${SOURCE:-cron}"
 
 if [ -f "$PAUSE_FLAG" ] && [ "${FORCE_RUN:-0}" != "1" ]; then
-    log INFO "Pause active - Exit"
+    log INFO "Pause active - lancement ${RUN_SOURCE} ignore (PID $$)"
     exit 0
 fi
 
@@ -55,26 +56,78 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     rm -rf "$LOCK_DIR"
     mkdir "$LOCK_DIR"
 fi
-trap 'rm -rf "$LOCK_DIR" "$PID_FILE"' EXIT
+trap '[ -n "${MONITOR_PID:-}" ] && kill "$MONITOR_PID" 2>/dev/null; rm -rf "$LOCK_DIR" "$PID_FILE"' EXIT
 trap 'log WARN "Arrete manuellement (SIGTERM)"; exit 143' TERM
 trap 'log WARN "Interrompu (SIGINT)"; exit 130' INT
 echo $$ > "$PID_FILE"
 
 log INFO "=============================================="
-log INFO "Demarrage sync..."
+log INFO "Demarrage sync... (source: ${RUN_SOURCE}, PID $$)"
 
 declare -A MAPPINGS=(
     ['media/Anime']='anime'
     ['media/Animated Movies']='Animated Movies'
-    ['media/Books']='books'
+    ['media/Books']='staging/books'
     ['media/Cartoons']='cartoons'
     ['media/Movies']='movies'
     ['media/TV Shows']='shows'
     ['media/adult-media']='adult-media'
+    ['media/jellyfin-adult']='jellyfin-adult'
     ['media/Music']='music'
 )
 
 ALL_KEYS=("${!MAPPINGS[@]}")
+
+if [ -n "${SSH_KEY:-}" ] && [ -f "$SSH_KEY" ]; then
+    SSH_BASE=(ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -p "${SSH_PORT:-22}" "$REMOTE_USER@$REMOTE_HOST")
+elif command -v sshpass >/dev/null 2>&1; then
+    SSH_BASE=(sshpass -p "$REMOTE_PASS" ssh -o StrictHostKeyChecking=accept-new -p "${SSH_PORT:-22}" "$REMOTE_USER@$REMOTE_HOST")
+else
+    SSH_BASE=()
+fi
+
+# Lance un monitoring de progression en arriere-plan (taille locale vs distante, toutes les 60s)
+# Retourne le PID du monitor via la variable globale MONITOR_PID (vide si indisponible)
+start_progress_monitor() {
+    local remote_dir="$1"
+    local local_dir="$2"
+    MONITOR_PID=""
+
+    [ "${#SSH_BASE[@]}" -eq 0 ] && return 0
+
+    local remote_size
+    remote_size=$("${SSH_BASE[@]}" "du -sb \"$remote_dir\" 2>/dev/null | cut -f1")
+    echo "$remote_size" | grep -qE '^[0-9]+$' || return 0
+    [ "$remote_size" -le 0 ] && return 0
+
+    (
+        local prev=0 cur delta rate_mb pct remain eta_min eta_txt
+        while true; do
+            sleep 60
+            cur=$(du -sb "$local_dir" 2>/dev/null | cut -f1)
+            [ -z "$cur" ] && cur=0
+            pct=$(( cur * 100 / remote_size ))
+            [ "$pct" -gt 100 ] && pct=100
+            delta=$(( cur - prev ))
+            rate_mb=$(( delta / 60 / 1024 / 1024 ))
+            remain=$(( remote_size - cur ))
+            if [ "$rate_mb" -gt 0 ]; then
+                eta_min=$(( remain / 1024 / 1024 / rate_mb / 60 ))
+                eta_txt="${eta_min} min"
+            else
+                eta_txt="?"
+            fi
+            log INFO "  Progression ~${pct}% (${rate_mb} MB/s, ETA ${eta_txt})"
+            prev=$cur
+        done
+    ) &
+    MONITOR_PID=$!
+}
+
+stop_progress_monitor() {
+    [ -n "${MONITOR_PID:-}" ] && kill "$MONITOR_PID" 2>/dev/null
+    MONITOR_PID=""
+}
 
 CATEGORY_MATCH=0
 if [ -n "$FILTER" ]; then
@@ -88,14 +141,7 @@ if [ -n "$FILTER" ] && [ "$CATEGORY_MATCH" -eq 0 ]; then
     log INFO "Recherche recursive du titre '$FILTER' via SSH..."
     TITLE_FOUND=0
 
-    if [ -n "${SSH_KEY:-}" ] && [ -f "$SSH_KEY" ]; then
-        SSH_BASE=(ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -p "${SSH_PORT:-22}" "$REMOTE_USER@$REMOTE_HOST")
-    elif command -v sshpass >/dev/null 2>&1; then
-        SSH_BASE=(sshpass -p "$REMOTE_PASS" ssh -o StrictHostKeyChecking=accept-new -p "${SSH_PORT:-22}" "$REMOTE_USER@$REMOTE_HOST")
-    else
-        SSH_BASE=()
-        log WARN "Pas de SSH_KEY ni sshpass - recherche titre impossible, passage direct au sync normal"
-    fi
+    [ "${#SSH_BASE[@]}" -eq 0 ] && log WARN "Pas de SSH_KEY ni sshpass - recherche titre impossible, passage direct au sync normal"
 
     if [ "${#SSH_BASE[@]}" -gt 0 ]; then
         # mindepth/maxdepth 2 = niveau "titre" (media/Categorie/Titre), pas les fichiers en dessous
@@ -120,6 +166,7 @@ if [ -n "$FILTER" ] && [ "$CATEGORY_MATCH" -eq 0 ]; then
             TITLE_FOUND=1
             log INFO "Match titre: ~/$remote_full_path"
             mkdir -p "$local_path/$rel"
+            start_progress_monitor "$remote_full_path" "$local_path/$rel"
             TMP_OUT=$(mktemp)
             lftp -u "$REMOTE_USER,$REMOTE_PASS" sftp://$REMOTE_HOST << LFTPEOF 2>&1 | tee "$TMP_OUT" | while IFS= read -r line; do log INFO "  $line"; done
 set ssl:verify-certificate no
@@ -132,6 +179,7 @@ mirror --verbose --only-newer --continue "$remote_full_path" "$local_path/$rel"
 bye
 LFTPEOF
             RC_TITLE=${PIPESTATUS[0]}
+            stop_progress_monitor
             TITLE_OUT=$(cat "$TMP_OUT")
             rm -f "$TMP_OUT"
             if [ "$RC_TITLE" -eq 0 ]; then
@@ -178,6 +226,7 @@ for remote_path in "${ORDERED_KEYS[@]}"; do
     log INFO "Debut: ~/$remote_path -> $local_path"
     START_TS=$(date +%s)
 
+    start_progress_monitor "$remote_path" "$local_path"
     TMP_OUT=$(mktemp)
     lftp -u "$REMOTE_USER,$REMOTE_PASS" sftp://$REMOTE_HOST << LFTPEOF 2>&1 | tee "$TMP_OUT" | while IFS= read -r line; do log INFO "  $line"; done
 set ssl:verify-certificate no
@@ -190,6 +239,7 @@ mirror --verbose --only-newer --continue "$remote_path" "$local_path"
 bye
 LFTPEOF
     RC=${PIPESTATUS[0]}
+    stop_progress_monitor
     LFTP_OUT=$(cat "$TMP_OUT")
     rm -f "$TMP_OUT"
     DURATION=$(( $(date +%s) - START_TS ))
