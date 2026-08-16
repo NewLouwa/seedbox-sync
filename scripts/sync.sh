@@ -78,6 +78,12 @@ declare -A MAPPINGS=(
 
 ALL_KEYS=("${!MAPPINGS[@]}")
 
+DELETE_FLAG=""
+if [ "${DELETE_AFTER_IMPORT:-0}" = "1" ]; then
+    DELETE_FLAG="--Remove-source-files"
+    log WARN "DELETE_AFTER_IMPORT actif - les fichiers distants seront supprimes apres transfert reussi (irreversible)"
+fi
+
 if [ -n "${SSH_KEY:-}" ] && [ -f "$SSH_KEY" ]; then
     SSH_BASE=(ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -p "${SSH_PORT:-22}" "$REMOTE_USER@$REMOTE_HOST")
 elif command -v sshpass >/dev/null 2>&1; then
@@ -95,21 +101,32 @@ start_progress_monitor() {
 
     [ "${#SSH_BASE[@]}" -eq 0 ] && return 0
 
-    local remote_size
+    local remote_size baseline
     remote_size=$("${SSH_BASE[@]}" "du -sb \"$remote_dir\" 2>/dev/null | cut -f1")
     echo "$remote_size" | grep -qE '^[0-9]+$' || return 0
     [ "$remote_size" -le 0 ] && return 0
 
+    baseline=$(du -sb "$local_dir" 2>/dev/null | cut -f1)
+    [ -z "$baseline" ] && baseline=0
+
     (
-        local prev=0 cur delta rate_mb pct remain eta_min eta_txt
+        local prev=$baseline cur delta rate_mb pct remain eta_min eta_txt
         while true; do
             sleep 60
             cur=$(du -sb "$local_dir" 2>/dev/null | cut -f1)
             [ -z "$cur" ] && cur=0
-            pct=$(( cur * 100 / remote_size ))
-            [ "$pct" -gt 100 ] && pct=100
             delta=$(( cur - prev ))
             rate_mb=$(( delta / 60 / 1024 / 1024 ))
+            prev=$cur
+
+            if [ "$cur" -ge "$remote_size" ]; then
+                # Local >= distant : fichiers legacy (anciennes versions/re-releases jamais
+                # nettoyees par mirror sans --delete) faussent le total, pas d'ETA fiable
+                log INFO "  Local >= taille distante totale (fichiers legacy probables) - ${rate_mb} MB/s sur la derniere minute"
+                continue
+            fi
+
+            pct=$(( cur * 100 / remote_size ))
             remain=$(( remote_size - cur ))
             if [ "$rate_mb" -gt 0 ]; then
                 eta_min=$(( remain / 1024 / 1024 / rate_mb / 60 ))
@@ -118,7 +135,6 @@ start_progress_monitor() {
                 eta_txt="?"
             fi
             log INFO "  Progression ~${pct}% (${rate_mb} MB/s, ETA ${eta_txt})"
-            prev=$cur
         done
     ) &
     MONITOR_PID=$!
@@ -128,6 +144,7 @@ stop_progress_monitor() {
     [ -n "${MONITOR_PID:-}" ] && kill "$MONITOR_PID" 2>/dev/null
     MONITOR_PID=""
 }
+
 
 CATEGORY_MATCH=0
 if [ -n "$FILTER" ]; then
@@ -175,7 +192,7 @@ set net:max-retries 3
 set net:timeout 30
 set xfer:use-temp-file yes
 set xfer:temp-file-name ".*.lftp-tmp"
-mirror --verbose --only-newer --continue "$remote_full_path" "$local_path/$rel"
+mirror --verbose --only-newer --continue $DELETE_FLAG "$remote_full_path" "$local_path/$rel"
 bye
 LFTPEOF
             RC_TITLE=${PIPESTATUS[0]}
@@ -235,7 +252,7 @@ set net:max-retries 3
 set net:timeout 30
 set xfer:use-temp-file yes
 set xfer:temp-file-name ".*.lftp-tmp"
-mirror --verbose --only-newer --continue "$remote_path" "$local_path"
+mirror --verbose --only-newer --continue $DELETE_FLAG "$remote_path" "$local_path"
 bye
 LFTPEOF
     RC=${PIPESTATUS[0]}

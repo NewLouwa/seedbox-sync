@@ -67,6 +67,9 @@ REMOTE_PASS='password_in_single_quotes'
 # Optional - SSH-based search (see How it works)
 #SSH_KEY=/root/.ssh/seedbox_ed25519
 #SSH_PORT=22
+
+# Optional - delete remote files after a successful transfer (irreversible, off by default)
+#DELETE_AFTER_IMPORT=1
 EOF
 
 chmod 600 /etc/seedbox-sync.env
@@ -74,6 +77,8 @@ chown root:root /etc/seedbox-sync.env
 ```
 
 The password must be wrapped in single quotes to prevent bash from interpreting any special characters it might contain (`$`, `` ` ``, spaces, etc).
+
+`DELETE_AFTER_IMPORT=1` adds `--Remove-source-files` to every `mirror` call: once a file is confirmed fully transferred, it's deleted from the remote seedbox. Useful for freeing up seedbox storage automatically, but **irreversible** - a failed or partial transfer is never deleted (lftp only removes after a confirmed successful transfer), but anything that does complete is gone from the remote immediately. Leave this unset/off unless you specifically want that behavior.
 
 ### 3. Cron
 
@@ -247,6 +252,8 @@ An atomic lock (`mkdir /tmp/ass.lock.d` - atomic because `mkdir` fails if the di
 
 ## Security
 
+- `.env` must never end up in this repo, nor in plain text in a ticket/chat/paste.
+- Change the seedbox password immediately if it's ever exposed, even accidentally.
 - Always wrap the password in single quotes in `.env` to neutralize shell special characters.
 - `xfer:use-temp-file` is enabled by default - see [Atomic writes](#atomic-writes).
 - Prefer a dedicated SSH key (not reused elsewhere) over `sshpass`, which exposes the password in the process list during execution.
