@@ -196,8 +196,31 @@ EOF
             echo "No run in progress"
         fi
         ;;
+    db)
+        shift
+        # Local audit ledger (SQLite) of remote vs local state. Read-only:
+        # it never downloads/deletes/moves - see scripts/seedbox-db.py.
+        if ! command -v python3 >/dev/null 2>&1; then
+            err "python3 not found - required for 'sbs db'"
+            exit 1
+        fi
+        set -a
+        source /etc/seedbox-sync.env
+        set +a
+        # Serialize the MAPPINGS assoc-array as "remote_key<TAB>local_folder" lines
+        # so the Python tool reuses config.sh as the single source of truth.
+        MAP_STR=""
+        for k in "${!MAPPINGS[@]}"; do
+            MAP_STR+="${k}"$'\t'"${MAPPINGS[$k]}"$'\n'
+        done
+        SEEDBOX_MAPPINGS="$MAP_STR" \
+        SEEDBOX_DB="${SEEDBOX_DB:-/opt/scripts/seedbox-sync/state/seedbox.db}" \
+        LOCAL_BASE="$LOCAL_BASE" \
+            python3 /opt/scripts/seedbox-sync/scripts/seedbox-db.py "$@"
+        ;;
     *)
-        echo "Usage: $0 {install-logrotate|watch|test|find <name>|start [filter]|pause|resume|stop|status}"
+        echo "Usage: $0 {install-logrotate|watch|test|find <name>|start [filter]|pause|resume|stop|status|db <subcmd>}"
+        echo "       db subcmds: scan-remote|scan-local|resync|diff|status|verify [pattern] [--full]"
         exit 1
         ;;
 esac

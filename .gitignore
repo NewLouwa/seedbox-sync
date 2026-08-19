@@ -5,3 +5,4 @@ PAUSED
 .DS_Store
 .env
 config.sh
+state/
