@@ -70,7 +70,17 @@ EOF
         source /etc/seedbox-sync.env
         set +a
         info "Testing connection to $REMOTE_HOST..."
-        OUT=$(lftp -u "$REMOTE_USER,$REMOTE_PASS" sftp://$REMOTE_HOST -e "set ssl:verify-certificate no; set net:max-retries 1; set net:timeout 15; ls; bye" 2>&1)
+        # Credentials go through stdin (user command), never on the argv/-e line,
+        # so they don't leak into ps/pgrep. Host stays on argv (not a secret).
+        OUT=$(lftp "sftp://$REMOTE_HOST" << LFTPEOF 2>&1
+user "$REMOTE_USER" "$REMOTE_PASS"
+set ssl:verify-certificate no
+set net:max-retries 1
+set net:timeout 15
+ls
+bye
+LFTPEOF
+)
         RC=$?
         if [ "$RC" -eq 0 ]; then
             ok "OK - connection and auth valid"
@@ -146,15 +156,15 @@ EOF
         fi
 
         # 2. Gracefully stop lftp so the partial file is flushed and resumable.
-        if pkill -TERM -f "lftp -u.*sftp://" 2>/dev/null; then
+        if pkill -TERM -f "lftp.*sftp://" 2>/dev/null; then
             warn "Sent SIGTERM to lftp - waiting for it to flush the partial file..."
             for _ in $(seq 1 15); do
-                pgrep -f "lftp -u.*sftp://" >/dev/null 2>&1 || break
+                pgrep -f "lftp.*sftp://" >/dev/null 2>&1 || break
                 sleep 1
             done
-            if pgrep -f "lftp -u.*sftp://" >/dev/null 2>&1; then
+            if pgrep -f "lftp.*sftp://" >/dev/null 2>&1; then
                 err "lftp still alive after 15s - forcing SIGKILL (partial may need re-download)"
-                pkill -9 -f "lftp -u.*sftp://" 2>/dev/null
+                pkill -9 -f "lftp.*sftp://" 2>/dev/null
             else
                 ok "lftp exited cleanly - partial left in resumable state"
             fi
@@ -218,9 +228,42 @@ EOF
         LOCAL_BASE="$LOCAL_BASE" \
             python3 /opt/scripts/seedbox-sync/scripts/seedbox-db.py "$@"
         ;;
+    help|--help|-h|"")
+        cat <<EOF
+
+$(info "sbs") - seedbox sync control
+
+$(ok "SYNC")
+  start [filter]    launch a sync now (optional priority: a category or a title)
+  stop              stop the running sync gracefully (partials stay resumable)
+  pause             block the next cron launches (does not stop a running sync)
+  resume            remove the pause
+
+$(ok "MONITOR")
+  status            paused? run in progress?
+  watch             follow the log live, colorized
+  test              check the seedbox connection and auth
+
+$(ok "REMOTE")
+  find <name>       recursive search for a title on the seedbox (via SSH)
+
+$(ok "DATABASE")  local audit ledger, read-only (never downloads/deletes)
+  db resync         refresh both sides (scan-remote + scan-local)
+  db scan-remote    snapshot the seedbox (sizes/mtimes)
+  db scan-local     snapshot /mnt/dl (+ partial hashes)
+  db diff           missing / incomplete / mismatch / extra / ok
+  db status         counters + size left to fetch
+  db verify [pat] [--full]   re-hash local files, flag corruption
+
+$(ok "SETUP")
+  install-logrotate generate /etc/logrotate.d/ass-sync
+
+EOF
+        exit 0
+        ;;
     *)
-        echo "Usage: $0 {install-logrotate|watch|test|find <name>|start [filter]|pause|resume|stop|status|db <subcmd>}"
-        echo "       db subcmds: scan-remote|scan-local|resync|diff|status|verify [pattern] [--full]"
+        err "Unknown command: '$1'"
+        echo "Run '$0 help' to see available commands." >&2
         exit 1
         ;;
 esac

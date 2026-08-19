@@ -203,7 +203,8 @@ if [ -n "$FILTER" ] && [ "$CATEGORY_MATCH" -eq 0 ]; then
             mkdir -p "$local_path/$rel"
             start_progress_monitor "$remote_full_path" "$local_path/$rel"
             TMP_OUT=$(mktemp)
-            lftp -u "$REMOTE_USER,$REMOTE_PASS" sftp://$REMOTE_HOST << LFTPEOF 2>&1 | tee "$TMP_OUT" | while IFS= read -r line; do log INFO "  $line"; done
+            lftp "sftp://$REMOTE_HOST" << LFTPEOF 2>&1 | tee "$TMP_OUT" | while IFS= read -r line; do log INFO "  $line"; done
+user "$REMOTE_USER" "$REMOTE_PASS"
 set ssl:verify-certificate no
 set sftp:auto-confirm yes
 set net:max-retries 3
@@ -263,7 +264,8 @@ for remote_path in "${ORDERED_KEYS[@]}"; do
 
     start_progress_monitor "$remote_path" "$local_path"
     TMP_OUT=$(mktemp)
-    lftp -u "$REMOTE_USER,$REMOTE_PASS" sftp://$REMOTE_HOST << LFTPEOF 2>&1 | tee "$TMP_OUT" | while IFS= read -r line; do log INFO "  $line"; done
+    lftp "sftp://$REMOTE_HOST" << LFTPEOF 2>&1 | tee "$TMP_OUT" | while IFS= read -r line; do log INFO "  $line"; done
+user "$REMOTE_USER" "$REMOTE_PASS"
 set ssl:verify-certificate no
 set sftp:auto-confirm yes
 set net:max-retries 3
