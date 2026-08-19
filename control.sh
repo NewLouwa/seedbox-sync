@@ -253,6 +253,7 @@ $(ok "DATABASE")  local audit ledger, read-only (never downloads/deletes)
   db scan-local     snapshot /mnt/dl (+ partial hashes)
   db diff           missing / incomplete / mismatch / extra / ok
   db status         counters + size left to fetch
+  db fetch [pat] [--dry-run] [--limit N]   download only missing/incomplete
   db verify [pat] [--full]   re-hash local files, flag corruption
 
 $(ok "SETUP")

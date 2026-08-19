@@ -381,6 +381,102 @@ def cmd_resync(con, args):
     cmd_status(con, args)
 
 
+def _fetch_targets(con, base, pats):
+    """Return (dirs, files, total_bytes) needing download.
+
+    'Already downloaded' = local file present with size == remote size. We only
+    stat the ~N candidate paths (no full-library hashing), so this is fast even
+    on a large library. Missing or short files are collected by their remote
+    parent directory so lftp mirrors just those title folders.
+    """
+    rows = con.execute(
+        "SELECT logical, remote_path, size FROM remote_files").fetchall()
+    dirs = {}          # remote_dir -> local_dir
+    files = 0
+    total = 0
+    for logical, rpath, rsize in rows:
+        if pats and not all(p.lower() in logical.lower() for p in pats):
+            continue
+        lpath = os.path.join(base, logical)
+        try:
+            lsize = os.stat(lpath).st_size
+        except OSError:
+            lsize = -1               # missing
+        if lsize == rsize:
+            continue                 # already have it, complete -> skip
+        # missing or short -> needs (re)download
+        files += 1
+        total += rsize - max(lsize, 0)
+        dirs.setdefault(os.path.dirname(rpath), os.path.dirname(lpath))
+    return dirs, files, total
+
+
+def cmd_fetch(con, args):
+    dry = "--dry-run" in args
+    limit = None
+    pats = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--limit":
+            if i + 1 >= len(args) or not args[i + 1].isdigit():
+                sys.exit("[fetch] --limit needs a number")
+            limit = int(args[i + 1])
+            i += 2
+            continue
+        if not a.startswith("--"):
+            pats.append(a)
+        i += 1
+
+    base = env("LOCAL_BASE", "/mnt/dl")
+    print("[fetch] refreshing remote list ...")
+    cmd_scan_remote(con, [])
+    dirs, files, total = _fetch_targets(con, base, pats)
+
+    if not dirs:
+        print("[fetch] nothing to do - everything present is already complete")
+        return
+    ordered = sorted(dirs.items())
+    if limit:
+        ordered = ordered[:limit]
+
+    print(f"[fetch] {files} file(s) to (re)download across {len(dirs)} folder(s), "
+          f"~{human(total)}"
+          f"{f' - limited to {len(ordered)} folder(s)' if limit else ''}")
+    for rdir, ldir in ordered:
+        print(f"   {rdir}")
+    if dry:
+        print("[fetch] --dry-run: nothing downloaded")
+        return
+
+    user = env("REMOTE_USER", required=True)
+    host = env("REMOTE_HOST", required=True)
+    pw = env("REMOTE_PASS", "")
+    done = 0
+    for rdir, ldir in ordered:
+        os.makedirs(ldir, exist_ok=True)
+        print(f"\n[fetch] mirror '{rdir}' ...", flush=True)
+        script = (
+            f'user "{user}" "{pw}"\n'
+            "set ssl:verify-certificate no\n"
+            "set sftp:auto-confirm yes\n"
+            "set net:max-retries 3\n"
+            "set net:timeout 30\n"
+            "set xfer:use-temp-file yes\n"
+            'set xfer:temp-file-name ".*.lftp-tmp"\n'
+            f'mirror --continue --ignore-time "{rdir}" "{ldir}"\n'
+            "bye\n"
+        )
+        rc = subprocess.run(
+            ["lftp", f"sftp://{host}"], input=script, text=True
+        ).returncode
+        if rc == 0:
+            done += 1
+        else:
+            print(f"[fetch] FAILED (rc={rc}) on '{rdir}'")
+    print(f"\n[fetch] done: {done}/{len(ordered)} folder(s) mirrored")
+
+
 COMMANDS = {
     "scan-remote": cmd_scan_remote,
     "scan-local": cmd_scan_local,
@@ -388,13 +484,14 @@ COMMANDS = {
     "diff": cmd_diff,
     "status": cmd_status,
     "verify": cmd_verify,
+    "fetch": cmd_fetch,
 }
 
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
         print("Usage: sbs db {scan-remote|scan-local|resync|diff|status|"
-              "verify [pattern] [--full]}")
+              "verify [pattern] [--full]|fetch [pattern] [--dry-run] [--limit N]}")
         sys.exit(1)
     con = db_connect()
     try:
