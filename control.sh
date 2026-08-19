@@ -129,18 +129,48 @@ EOF
         echo "Follow: tail -f /var/log/ass-sync.log"
         ;;
     stop)
+        # Graceful shutdown - see docs: a hard SIGKILL on lftp mid-transfer used to
+        # leave the local file in a wrong-size state, forcing a full re-download on
+        # the next run ("Removing old file" + "Transferring file"). Now we SIGTERM
+        # lftp so it exits cleanly, leaving its ".*.lftp-tmp" partial in a valid,
+        # resumable state (mirror --continue picks it up). SIGKILL is a last resort.
         PID=$(cat "$PID_FILE" 2>/dev/null || true)
+
+        # 1. Signal sync.sh first (its TERM trap is deferred until the lftp pipeline
+        #    ends, so it won't move on to the next category once lftp is gone).
         if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
             warn "Stopping sync.sh (PID $PID)..."
-            kill -TERM "$PID"
-            sleep 2
-            kill -0 "$PID" 2>/dev/null && { err "Still alive, kill -9"; kill -9 "$PID"; }
+            kill -TERM "$PID" 2>/dev/null
         else
             info "No sync.sh running (PID file missing or stale)"
         fi
-        if pkill -f "lftp -u.*sftp://" 2>/dev/null; then
-            warn "Active lftp process killed"
+
+        # 2. Gracefully stop lftp so the partial file is flushed and resumable.
+        if pkill -TERM -f "lftp -u.*sftp://" 2>/dev/null; then
+            warn "Sent SIGTERM to lftp - waiting for it to flush the partial file..."
+            for _ in $(seq 1 15); do
+                pgrep -f "lftp -u.*sftp://" >/dev/null 2>&1 || break
+                sleep 1
+            done
+            if pgrep -f "lftp -u.*sftp://" >/dev/null 2>&1; then
+                err "lftp still alive after 15s - forcing SIGKILL (partial may need re-download)"
+                pkill -9 -f "lftp -u.*sftp://" 2>/dev/null
+            else
+                ok "lftp exited cleanly - partial left in resumable state"
+            fi
         fi
+
+        # 3. Now that the pipeline is closed, give sync.sh's TERM trap a moment,
+        #    then SIGKILL as a last resort.
+        if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+            for _ in $(seq 1 5); do
+                kill -0 "$PID" 2>/dev/null || break
+                sleep 1
+            done
+            kill -0 "$PID" 2>/dev/null && { err "sync.sh still alive - SIGKILL"; kill -9 "$PID" 2>/dev/null; }
+        fi
+
+        # 4. Reap orphaned progress monitors.
         if [ -f "$MONITOR_PID_FILE" ]; then
             while IFS= read -r mpid; do
                 [ -z "$mpid" ] && continue
