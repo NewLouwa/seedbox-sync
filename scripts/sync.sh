@@ -40,6 +40,11 @@ log() {
     fi
 }
 
+# Human-readable byte size (e.g. 4855192077 -> 4.5GiB), for log lines.
+hsize() {
+    numfmt --to=iec-i --suffix=B --format='%.1f' "${1:-0}" 2>/dev/null || echo "${1:-0}B"
+}
+
 FILTER="${1:-}"
 RUN_SOURCE="${SOURCE:-cron}"
 
@@ -120,7 +125,7 @@ start_progress_monitor() {
             if [ "$cur" -ge "$remote_size" ]; then
                 # Local >= remote: legacy files (old versions/re-releases never cleaned up
                 # by mirror without --delete) skew the total, no reliable ETA
-                log INFO "  Local >= total remote size (legacy files likely)"
+                log INFO "  $(hsize "$cur") / $(hsize "$remote_size") - local >= remote total (legacy files likely)"
                 continue
             fi
 
@@ -141,7 +146,7 @@ start_progress_monitor() {
             else
                 eta_txt="?"
             fi
-            log INFO "  Progress ~${pct}% (avg: $(( avg_kb / 1024 )) MB/s, ETA ${eta_txt})"
+            log INFO "  Progress ~${pct}% ($(hsize "$cur") / $(hsize "$remote_size"), avg: $(( avg_kb / 1024 )) MB/s, ETA ${eta_txt})"
         done
     ) &
     MONITOR_PID=$!
