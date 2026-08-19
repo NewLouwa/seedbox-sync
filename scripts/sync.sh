@@ -106,7 +106,12 @@ start_progress_monitor() {
     echo "$remote_size" | grep -qE '^[0-9]+$' || return 0
     [ "$remote_size" -le 0 ] && return 0
 
-    baseline=$(du -sb "$local_dir" 2>/dev/null | cut -f1)
+    # Progress is measured on the in-flight lftp temp file(s), NOT on du of the
+    # whole folder: a folder can also hold legacy/other-release files (e.g. an old
+    # WEBRip next to the new Bluray) that are not part of this transfer and would
+    # otherwise inflate the size past 100%. The temp file is exactly what is being
+    # written now, so cur/total tracks the current download cleanly.
+    baseline=$(find "$local_dir" -name '*.lftp-tmp' -printf '%s\n' 2>/dev/null | awk '{s+=$1} END{print s+0}')
     [ -z "$baseline" ] && baseline=0
     local start_ts
     start_ts=$(date +%s)
@@ -117,15 +122,14 @@ start_progress_monitor() {
         while [ "$tick" -lt "$max_ticks" ]; do
             sleep 60
             tick=$((tick + 1))
-            cur=$(du -sb "$local_dir" 2>/dev/null | cut -f1)
+            cur=$(find "$local_dir" -name '*.lftp-tmp' -printf '%s\n' 2>/dev/null | awk '{s+=$1} END{print s+0}')
             [ -z "$cur" ] && cur=0
             elapsed=$(( $(date +%s) - start_ts ))
             transferred=$(( cur - baseline ))
 
-            if [ "$cur" -ge "$remote_size" ]; then
-                # Local >= remote: legacy files (old versions/re-releases never cleaned up
-                # by mirror without --delete) skew the total, no reliable ETA
-                log INFO "  $(hsize "$cur") / $(hsize "$remote_size") - local >= remote total (legacy files likely)"
+            if [ "$cur" -le 0 ]; then
+                # No temp file right now: finalizing (rename) or between files
+                log INFO "  finalizing / between files..."
                 continue
             fi
 
@@ -137,9 +141,14 @@ start_progress_monitor() {
                 avg_kb=0
             fi
 
-            pct=$(( cur * 100 / remote_size ))
-            remain=$(( remote_size - cur ))
-            if [ "$avg_kb" -gt 0 ]; then
+            if [ "$cur" -ge "$remote_size" ]; then
+                pct=100
+                remain=0
+            else
+                pct=$(( cur * 100 / remote_size ))
+                remain=$(( remote_size - cur ))
+            fi
+            if [ "$avg_kb" -gt 0 ] && [ "$remain" -gt 0 ]; then
                 eta_sec=$(( remain / 1024 / avg_kb ))
                 eta_min=$(( eta_sec / 60 ))
                 eta_txt="${eta_min} min"
