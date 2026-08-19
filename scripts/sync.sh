@@ -210,7 +210,7 @@ set net:max-retries 3
 set net:timeout 30
 set xfer:use-temp-file yes
 set xfer:temp-file-name ".*.lftp-tmp"
-mirror --verbose --only-newer --continue $DELETE_FLAG "$remote_full_path" "$local_path/$rel"
+mirror --verbose --ignore-time --continue $DELETE_FLAG "$remote_full_path" "$local_path/$rel"
 bye
 LFTPEOF
             RC_TITLE=${PIPESTATUS[0]}
@@ -270,7 +270,7 @@ set net:max-retries 3
 set net:timeout 30
 set xfer:use-temp-file yes
 set xfer:temp-file-name ".*.lftp-tmp"
-mirror --verbose --only-newer --continue $DELETE_FLAG "$remote_path" "$local_path"
+mirror --verbose --ignore-time --continue $DELETE_FLAG "$remote_path" "$local_path"
 bye
 LFTPEOF
     RC=${PIPESTATUS[0]}
