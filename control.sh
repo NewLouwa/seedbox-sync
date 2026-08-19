@@ -234,7 +234,8 @@ LFTPEOF
 $(info "sbs") - seedbox sync control
 
 $(ok "SYNC")
-  start [filter]    launch a sync now (optional priority: a category or a title)
+  start [filter]    sync now - only missing/incomplete titles are fetched
+                    (optional priority: a category or a title)
   stop              stop the running sync gracefully (partials stay resumable)
   pause             block the next cron launches (does not stop a running sync)
   resume            remove the pause

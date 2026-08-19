@@ -250,6 +250,37 @@ else
     ORDERED_KEYS=("${ALL_KEYS[@]}")
 fi
 
+# Default mode: only touch what is actually missing/incomplete. One SSH find
+# over the category + a local stat per file tells us which sub-folders (title or
+# season level) still need work; complete titles are never even visited by lftp.
+# Writes the list of category-relative sub-folders to $3 (one per line).
+# Return: 0 = list is authoritative (may be empty = category fully in sync)
+#         2 = could not determine (no SSH, find failed, empty) -> caller must
+#             fall back to a full-category mirror so nothing is wrongly skipped.
+folders_needing_work() {
+    local remote_cat="$1" local_dir="$2" outfile="$3"
+    : > "$outfile"
+    [ "${#SSH_BASE[@]}" -eq 0 ] && return 2
+
+    local findout rc
+    findout=$("${SSH_BASE[@]}" "find \"$remote_cat\" -type f -printf '%s\t%P\n' 2>/dev/null")
+    rc=$?
+    [ "$rc" -ne 0 ] && return 2
+    [ -z "$findout" ] && return 2
+
+    while IFS=$'\t' read -r rsize rel; do
+        [ -z "$rel" ] && continue
+        local lpath="$local_dir/$rel" lsize=-1
+        [ -f "$lpath" ] && lsize=$(stat -c %s "$lpath" 2>/dev/null || echo -1)
+        if [ "$lsize" != "$rsize" ]; then
+            local sub="${rel%/*}"
+            [ "$sub" = "$rel" ] && sub="."   # file directly under the category
+            echo "$sub"
+        fi
+    done <<< "$findout" | sort -u > "$outfile"
+    return 0
+}
+
 SUCCESS=0
 FAIL=0
 FAILED_PATHS=()
@@ -258,13 +289,39 @@ for remote_path in "${ORDERED_KEYS[@]}"; do
     local_folder="${MAPPINGS[$remote_path]}"
     local_path="$LOCAL_BASE/$local_folder"
     mkdir -p "$local_path"
-
-    log INFO "Starting: ~/$remote_path -> $local_path"
     START_TS=$(date +%s)
 
-    start_progress_monitor "$remote_path" "$local_path"
-    TMP_OUT=$(mktemp)
-    lftp "sftp://$REMOTE_HOST" << LFTPEOF 2>&1 | tee "$TMP_OUT" | while IFS= read -r line; do log INFO "  $line"; done
+    # Decide which sub-folders to mirror (selective), or fall back to the whole
+    # category if we could not determine it reliably.
+    SUBS_FILE=$(mktemp)
+    if folders_needing_work "$remote_path" "$local_path" "$SUBS_FILE"; then
+        if [ ! -s "$SUBS_FILE" ]; then
+            rm -f "$SUBS_FILE"
+            log INFO "Up to date: ~/$remote_path (nothing missing) - skipped"
+            ((SUCCESS++))
+            continue
+        fi
+        mapfile -t SUBS < "$SUBS_FILE"
+        log INFO "Selective: ~/$remote_path -> ${#SUBS[@]} folder(s) need work"
+    else
+        SUBS=("")   # fallback: mirror the whole category root
+        log INFO "Full mirror: ~/$remote_path (selective scan unavailable)"
+    fi
+    rm -f "$SUBS_FILE"
+
+    CAT_FAIL=0
+    for sub in "${SUBS[@]}"; do
+        if [ -z "$sub" ] || [ "$sub" = "." ]; then
+            r_path="$remote_path"; l_path="$local_path"
+        else
+            r_path="$remote_path/$sub"; l_path="$local_path/$sub"
+        fi
+        mkdir -p "$l_path"
+        log INFO "Starting: ~/$r_path -> $l_path"
+
+        start_progress_monitor "$r_path" "$l_path"
+        TMP_OUT=$(mktemp)
+        lftp "sftp://$REMOTE_HOST" << LFTPEOF 2>&1 | tee "$TMP_OUT" | while IFS= read -r line; do log INFO "  $line"; done
 user "$REMOTE_USER" "$REMOTE_PASS"
 set ssl:verify-certificate no
 set sftp:auto-confirm yes
@@ -272,23 +329,27 @@ set net:max-retries 3
 set net:timeout 30
 set xfer:use-temp-file yes
 set xfer:temp-file-name ".*.lftp-tmp"
-mirror --verbose --ignore-time --continue $DELETE_FLAG "$remote_path" "$local_path"
+mirror --verbose --ignore-time --continue $DELETE_FLAG "$r_path" "$l_path"
 bye
 LFTPEOF
-    RC=${PIPESTATUS[0]}
-    stop_progress_monitor
-    LFTP_OUT=$(cat "$TMP_OUT")
-    rm -f "$TMP_OUT"
-    DURATION=$(( $(date +%s) - START_TS ))
+        RC=${PIPESTATUS[0]}
+        stop_progress_monitor
+        LFTP_OUT=$(cat "$TMP_OUT")
+        rm -f "$TMP_OUT"
+        if [ "$RC" -ne 0 ]; then
+            CAT_FAIL=1
+            log ERROR "FAIL ~/$r_path rc=$RC: $(echo "$LFTP_OUT" | tail -n 3 | tr '\n' ' | ')"
+        fi
+    done
 
-    if [ "$RC" -eq 0 ]; then
+    DURATION=$(( $(date +%s) - START_TS ))
+    if [ "$CAT_FAIL" -eq 0 ]; then
         ((SUCCESS++))
         log INFO "OK  ~/$remote_path (${DURATION}s)"
     else
         ((FAIL++))
         FAILED_PATHS+=("$remote_path")
-        log ERROR "FAIL ~/$remote_path (${DURATION}s) rc=$RC"
-        log ERROR "lftp: $(echo "$LFTP_OUT" | tail -n 5 | tr '\n' ' | ')"
+        log ERROR "FAIL ~/$remote_path (${DURATION}s)"
     fi
 done
 
