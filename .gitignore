@@ -6,3 +6,5 @@ PAUSED
 .env
 config.sh
 state/
+__pycache__/
+*.pyc
